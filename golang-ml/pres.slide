@@ -1,0 +1,463 @@
+
+Machine Learning Microservices
+Golang Melbourne
+
+Charles Shenton
+Chrono Technologies
+charlieshenton@me.com
+
+: Thanks to organisers, sponsors
+
+
+* Types of Algorithm
+
+- *Batch:* Update requires full dataset, service does inference only
+
+- *Real-time:* Updating requires new data, service does inference and training
+
+.image img/diagram.png _ 800
+
+: Batch: async update via data pipeline, job servers
+: either internal and highly coupled, or external and highly generic (Cloud translate)
+: Real-time: learning occurs within request-response cycle
+: decoupled, only gets its data through networked API
+: "hold tensorflow graph in memory" vs. "independent ml service"
+
+
+* Seer
+
+- Real-time API for time series forecasting
+
+- Trains on streams of events like "we had 24 sales this hour"
+
+- Produces forecasts like "we'll sell 40 units 5 days from now (± 3 units)"
+
+- Synchronously updates the model within the request-response cycle
+
+- All without retaining any data
+
+- Started out in python, now 100% of codebase is in Go
+
+: User interface simplified down to a double and a Timestamp
+: Forecasting is a matter of "give me forecast"
+: Can scale out to millions of separate streams, and up to second granularity
+
+
+* Seer
+
+.image img/forecast.png _ 800
+
+: User inputs grey data as it arrives
+: All the user gave us was "100" as in give me the next 100 time periods
+: Confidence intervals generated for the forecast
+: Full cycle, pull and deserialise model, generate forecast, serialise and return, takes about 10ms
+: Why do machine learning in go? Why do machine learning in any language? ...
+
+
+* Machine Learning Ingredients
+
+
+* Basic Ingredients
+
+- What does a language need to do machine learning?
+
+- Good floating point math
+
+    Python: numpy
+    Java: stdlib math
+    Go: stdlib math
+
+- Matrix / linear algebra library that implements BLAS (either pure or binded)
+
+    Python: numpy.matrix
+    Java: JAMA, la4j, Apache Commons Math, etc...
+    Go: gonum/mat
+
+: With these you can implement many non deep learning algorithms
+: Random forests, standard regression, optimal bayesian algorithms (kalman filters)
+: Algorithms that work with numerical gradient based optimization (i.e. L-BFGS-B)
+: Basically anything that doesn't require Stochastic Gradient Descent / symbolic differentiation
+
+
+* Advanced Ingredients
+
+- Tensor (nd-array) library
+
+    Python: numpy.ndarray
+    Java: nd4j
+    Go: gorgonia/tensor
+
+- Differentiable programming
+
+    Python: tensorflow, pytorch, cntk, theano, chainer
+    Java: dl4j
+    Go: gorgonia/gorgonia
+
+- Let's talk about Go's implementations
+
+: With these you can implement the sexy stuff, fully-connected, convolutional, and recurrent NNs
+: And everything that builds on those
+: Deep reinforcement learning, variational inference, generative adversarial networks
+
+
+* The Good
+
+- Performant
+
+- Feature complete
+
+- Great build options, with optional cgo and asm for different envs
+
+- Surprisingly Australian
+    gonum: Dan Kortschak, Adelaide
+    gorgonia: Xuanyi Chew, Sydney
+
+: In my usage, once the data is in memory, gonum is competitive with numpy, which drops down to C
+: So you can target app-engine, for example
+: Dan is a Biostatistics professor
+: Xuanyi is a data scientist / software developer
+
+
+* The Bad
+
+- Not super test coverage
+    gonum: 74%
+    gorgonia: 61%
+
+- Unidiomatic, "tf, np, tt" inspired namespacing conventions
+    import (
+        T "gorgonia.org/gorgonia"
+    )
+
+    g := T.NewGraph()
+    x := T.NewMatrix(g, T.Float32, T.WithName("x"), T.WithShape(100, 100))
+    y := T.NewMatrix(g, T.Float32, T.WithName("y"), T.WithShape(100, 100))
+
+: A diff computing library has too much surface area to use a single namespace
+: Tensorflow, for example, breaks down even this core functionality into different namespaces
+: My biggest issue playing with gorgonia is that it's not nicely separated
+: There are interfaces, but they are very big
+
+
+* The Ugly
+
+- Unidiomatic error handling
+    // No error return value
+    // Just panics with "matrix: input slice length mismatch"
+    m := mat.NewDense(2, 2, []float64{1, 2, 3})
+
+- Uninformative error messages
+    # numpy index error
+    IndexError: index 3 is out of bounds for axis 0 with size 3
+
+    // gonum index error
+    matrix: index out of range
+
+    :(
+
+: This is not a style issue, this actually slows down development
+: Worst case, can stop us from taking advantage of the language's strongest features
+: If there are these issues, why write ML services in Go at all?
+
+
+* The Why
+
+- For production real-time algorithms, benefits outweigh the costs:
+
+- gonum is still a great scientific computing library
+
+- Serialisation is cheap
+
+- Serialisation is possible
+
+- Python's ecosystem advantage holds it back here
+
+- Forced to understand your algorithm
+
+- Result is a very fast, service that's easy to reason about (currently single events are 5ms, batch events process >10k events per second, forecasts are ~10ms)
+
+
+: Serialisation matters if you're serving multiple models, you can't hold them all in memory
+: Once you're storing models, slow serialisation means high CPU usage, bad request latency
+: Serving just one model? Don't care about request latency? You probably don't need a microservice
+: Serialisation story for 'out-of-box' algorithms is "write this non-portable format to a 3GB file on disk"
+: Understanding algo good. Allow you to debug edge cases, example with insane predictions under a year
+
+
+* Designing ML APIs
+
+* Design Flow
+
+- Determine what types of resources an API provides
+
+- Determine the relationships between resources
+
+- Decide the resource name schemes based on types and relationships
+
+- Decide the resource schemas
+
+- Attach minimum set of methods to resources
+
+(from Google API design guide https://cloud.google.com/apis/design/)
+
+: If you're sold on REST and/or grpc, this is a great no-BS guide
+: Since ML is complex, good API design is needed even more
+
+
+* Advice
+
+- Avoid using machine learning jargon in endpoints
+
+- Focus on what data the user has, and what results they want
+
+- Hide everything else as much as the problem permits
+
+- Fit the algorithm to the user interface, not vice versa
+
+: This is the hardest thing to get data scientists happy with
+: Will generally only happen when they're responsible for production software
+: How? Don't silo capabilities, get users of APIs talking to engineers AND data scientists implementing them
+
+
+* First Iteration
+
+    /v1/series (GET, POST)
+
+    /v1/series/* (GET, DELETE)
+
+    /v1/series/*/points (GET, POST)
+
+    /v1/series/*/points/* (GET, DELETE)
+
+    /v1/series/*/runs (GET, POST)
+
+    /v1/series/*/runs/* (GET, DELETE)
+
+    /v1/series/*/forecasts (GET)
+
+    /v1/series/*/forecasts/* (GET)
+
+    /v1/series/*/accuracies (GET)
+
+    /v1/series/*/accuracies/* (GET)
+
+: Load up all your data
+: Make an api call to train a model on a subset of it
+: Query accuracies to see if the model looks good enough
+: if it is, query forecasts
+
+
+* Second Iteration
+
+    /v1/series (GET, POST)
+
+    /v1/series/* (GET, DELETE)
+
+    /v1/series/*/events (GET, POST)
+
+    /v1/series/*/events/* (GET, POST)
+
+    /v1/series/*/forecasts (GET)
+
+    /v1/series/*/forecasts/* (GET)
+
+    /v1/series/*/accuracies (GET)
+
+    /v1/series/*/accuracies/* (GET)
+
+- Hides "runs" behind the scenes
+- Somewhat more useful "events" name
+
+: Models are still batched here, that's why we need to store all this state.
+: That's also why we need a larger API surface area, because each new event generates a lot of associated data.
+: But majority of that associated data isn't useful (stale forecasts, accuracies) or is technical (accuracies).
+: It's at this point I had a fairly hectic math weekend...
+
+
+* Final Iteration
+
+    /v1/streams (GET, POST)
+
+    /v1/streams/* (GET, PUT, DELETE)
+
+    /v1/streams/*/forecast (GET)
+- Less ambiguous "stream" name
+- Only provides the data you need (the next forecast)
+- We update the model by directly altering the stream resource
+- (which updates its' current time, but also triggers an online model update)
+
+: Devoid of machine learning terms "jobs", "hyperparameters", "runs"
+: Just talks in terms of the relevant data structures
+
+
+* Protocol buffers
+
+    service Seer {
+        rpc CreateStream (CreateStreamRequest) returns (Stream) {
+            option (google.api.http) = {
+                post: "/v1/streams"
+            };
+        }
+        rpc GetStream (GetStreamRequest) returns (Stream) {
+            option (google.api.http) = {
+                get: "/v1/streams/{name=*}"
+            };
+        }
+        rpc UpdateStream (UpdateStreamRequest) returns (Stream) {
+            option (google.api.http) = {
+                put: "/v1/streams/{name=*}"
+            };
+        }
+    ...
+
+
+* Protocol buffers
+
+    ...
+        rpc DeleteStream (DeleteStreamRequest) returns (google.protobuf.Empty) {
+            option (google.api.http) = {
+                delete: "/v1/streams/{name=*}"
+            };
+        }
+        rpc ListStreams (ListStreamsRequest) returns (ListStreamsResponse) {
+            option (google.api.http) = {
+                get: "/v1/streams"
+            };
+        }
+        rpc GetForecast (GetForecastRequest) returns (Forecast) {
+            option (google.api.http) = {
+                get: "/v1/streams/{name=*}/forecast"
+            };
+        }
+    }
+
+
+* (For Reference)
+
+    message Stream {
+        string name = 1;
+        double period = 2;   // time between events in seconds
+        google.protobuf.Timestamp last_event_time = 3;
+        Domain domain = 4;   // constraints ...
+        double min = 5;
+        double max = 6;
+    }
+
+    message Event {
+        repeated google.protobuf.Timestamp times = 1;
+        repeated double values = 2;
+    }
+
+    message Forecast {
+        repeated google.protobuf.Timestamp times = 1;
+        repeated double values = 2;
+        repeated Interval intervals = 3;
+    }
+
+: This is basically the entire API
+: CreateStreamRequest stlye messages just wrap the above for forwards compatibility
+
+
+* Future of the Go ML Ecosystem
+
+: Recommendations
+: Want a user friendly API for neural nets? Use the Go tensorflow bindings, use python for training for now
+: For any ML that doesn't fit inside tensorflow, Go is great for going from a numpy script to a production service
+: If you're building your own non-SGD algorithms? Go for it
+: What if you want to use Go for everything?
+
+
+* What's Next?
+
+- Go needs a rock solid, well separated nd-array implementation
+- Until then, anyone writing big ML systems will default to C++
+- What's wrong with gorgonia/tensor?
+
+
+* Well...
+
+    type Tensor interface {
+            // info about the ndarray
+            Shape() Shape
+            Strides() []int
+            Dtype() Dtype
+            Dims() int
+            Size() int
+            DataSize() int
+
+            // Data access related
+            RequiresIterator() bool
+            Iterator() Iterator
+
+            // ops
+            Slicer
+            At(...int) (interface{}, error)
+            SetAt(v interface{}, coord ...int) error
+            Reshape(...int) error
+            T(axes ...int) error
+            UT()
+            Transpose() error // Transpose actually moves the data
+            Apply(fn interface{}, opts ...FuncOpt) (Tensor, error)
+    ...
+
+* Oh you thought we were done?
+
+    ...
+            // data related interface
+            Zeroer
+            MemSetter
+            Dataer
+            Eq
+            Cloner
+
+            // type overloading methods
+            IsScalar() bool
+            ScalarValue() interface{}
+
+            // engine/memory related stuff
+            // all Tensors should be able to be expressed of as a slab of memory
+            // Note: the size of each element can be acquired by T.Dtype().Size()
+            Engine() Engine             // Engine can be nil
+            MemSize() uintptr           // the size in memory
+            Uintptr() uintptr           // the pointer to the first element, as a uintptr
+            Pointer() unsafe.Pointer    // the pointer to the first elemment as a unsafe.Ponter
+            IsNativelyAccessible() bool // Can Go access the memory
+            IsManuallyManaged() bool    // Must Go manage the memory
+    ...
+
+
+* We're just getting started
+
+    ...
+            // formatters
+            fmt.Formatter
+            fmt.Stringer
+
+            // all Tensors are serializable to these formats
+            WriteNpy(io.Writer) error
+            ReadNpy(io.Reader) error
+            gob.GobEncoder
+            gob.GobDecoder
+
+            standardEngine() standardEngine
+            headerer
+            arrayer
+    }
+
+- Used to be part of gorgonia core
+- Still not well separated
+- Single namespace obfuscates the actual API
+
+: Big interfaces don't make the library bad
+: But it makes writing Go DL code not as nice as working around tensorflow serialisation etc.
+
+
+* What's next for seer?
+
+- I've enjoyed developing new ML algorithms *too* much
+
+- Decided to pursue machine learning research
+
+- Will be open sourcing modified seer (grpc server, embedded DB)
+
+- Get in touch if it seems like something you want to run
